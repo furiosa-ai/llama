@@ -14,6 +14,7 @@ import os
 USE_CUDA = os.environ.get('USE_CUDA', False)
 USE_XLA = os.environ.get('USE_XLA', False)
 
+
 # Some how xla init will slow down the CUDA speed.
 if not USE_CUDA:
     import torch_xla.core.xla_model as xm
@@ -34,6 +35,8 @@ class LLaMA:
                 self._generate_one_token_fn,
                 backend="torchxla_trace_once",
                 fullgraph=True)
+        self.latency_list: List[float] = []
+        self.per_token_latency_list: List[float] = []         
 
     def _generate_one_token(self, tokens, input_tokens, input_text_mask,
                             cur_pos_tensor, input_pos_tensor,
@@ -169,7 +172,11 @@ class LLaMA:
             except IndexError:
                 sentence = self.tokenizer.decode(t[1:])
             decoded.append(sentence)
-        print(f"Completed in {time.time() - start_time:.5f} seconds")
+        latency = time.time() - start_time
+        per_token_latency = latency / (total_len - 1)
+        print(f"Completed in {latency:.5f} seconds")
+        self.latency_list.append(latency)
+        self.per_token_latency_list.append(per_token_latency)
         return decoded
 
 
