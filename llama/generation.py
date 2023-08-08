@@ -12,6 +12,7 @@ from llama.model import Transformer
 import os
 
 USE_CUDA = os.environ.get('USE_CUDA', False)
+USE_XLA = os.environ.get('USE_XLA', False)
 
 # Some how xla init will slow down the CUDA speed.
 if not USE_CUDA:
@@ -28,7 +29,7 @@ class LLaMA:
             # Inductor errors out when compiles _generate_one_token_fn.
             # TODO(alanwaketan): figure out why.
             self.model = torch.compile(self.model, fullgraph=True)
-        else:
+        if USE_XLA:
             self._generate_one_token_fn = torch.compile(
                 self._generate_one_token_fn,
                 backend="torchxla_trace_once",
