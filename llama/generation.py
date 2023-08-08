@@ -107,7 +107,8 @@ class LLaMA:
         decoding_start_time = time.time()
         prev_pos = 0
         buckets = [128, 256, 384, 512]
-        assert params.max_seq_len % buckets[-1] == 0
+        # NOTE: This is a temporary measure to run with max_seq_len=256
+        # assert params.max_seq_len % buckets[-1] == 0
         while prev_pos < min_prompt_size:
             remaining = min_prompt_size - prev_pos
             section_len = 0
