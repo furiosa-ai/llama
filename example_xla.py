@@ -17,6 +17,7 @@ import os
 
 USE_CUDA = os.environ.get('USE_CUDA', False)
 
+
 # Some how xla init will slow down the CUDA speed.
 if not USE_CUDA:
     import torch_xla.core.xla_model as xm
@@ -101,6 +102,7 @@ def main(
     n_layers: int = 32,
     n_heads: int = 32,
     quant: bool = False,
+    n_times: int = 3,
 ):
     rank, world_size = setup_model_parallel()
     if rank > 0:
@@ -137,7 +139,7 @@ def main(
         #
         #cheese =>""",
     ]
-    for _ in range(2):
+    for _ in range(n_times + 1):
         with torch.no_grad():
             results = generator.generate(prompts,
                                          256,
@@ -148,6 +150,11 @@ def main(
         for result in results:
             print(result)
             print("\n==================================\n")
+    print("XLA:GPU ENV INFO:")
+    print(f"USE_XLA: {bool(USE_XLA)}, USE_CUDA: {bool(USE_CUDA)}, NUM_GPU(S): {GPU_NUM_DEVICES}")
+    print(f"Run LLaMA model in {ckpt_dir} for {n_times} prompts with {max_batch_size} max batch size(s)")
+    print(f"\t- mean latency: {sum(generator.latency_list[1:]) / n_times}(s)")
+    print(f"\t- mean per-token latency: {sum(generator.per_token_latency_list[1:]) / n_times * 1000}(ms/token)")
 
 
 def _fn(
@@ -162,9 +169,10 @@ def _fn(
     n_layers: int = 32,
     n_heads: int = 32,
     quant: bool = False,
+    n_times: int = 3,
 ):
     main(tokenizer_path, temperature, top_p, max_seq_len, max_batch_size,
-         ckpt_dir, dim, n_layers, n_heads, quant)
+         ckpt_dir, dim, n_layers, n_heads, quant, n_times)
 
 
 def mp_main(
@@ -179,15 +187,16 @@ def mp_main(
     n_layers: int = 32,
     n_heads: int = 32,
     quant: bool = False,
+    n_times: int = 3,
 ):
     if mp:
         xmp.spawn(_fn,
                   args=(tokenizer_path, temperature, top_p, max_seq_len,
                         max_batch_size, ckpt_dir, dim, n_layers, n_heads,
-                        quant))
+                        quant, n_times))
     else:
         main(tokenizer_path, temperature, top_p, max_seq_len, max_batch_size,
-             ckpt_dir, dim, n_layers, n_heads, quant)
+             ckpt_dir, dim, n_layers, n_heads, quant, n_times)
 
 
 if __name__ == "__main__":
