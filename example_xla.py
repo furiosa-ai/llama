@@ -15,10 +15,14 @@ from llama.xla_model_parallel import get_model_parallel_rank, get_model_parallel
 
 import os
 
-USE_CUDA = os.environ.get('USE_CUDA', False)
+USE_CUDA = bool(int(os.environ.get('USE_CUDA', 0)))
+USE_XLA = bool(int(os.environ.get('USE_XLA', 0)))
+USE_TORCH_DYNAMO = bool(int(os.environ.get('USE_TORCH_DYNAMO', 1)))
+GPU_NUM_DEVICES = int(os.environ.get("GPU_NUM_DEVICES", 0))
+
 
 # Some how xla init will slow down the CUDA speed.
-if not USE_CUDA:
+if USE_XLA:
     import torch_xla.core.xla_model as xm
     import torch_xla.distributed.xla_multiprocessing as xmp
 
@@ -101,6 +105,7 @@ def main(
     n_layers: int = 32,
     n_heads: int = 32,
     quant: bool = False,
+    n_times: int = 3,
 ):
     rank, world_size = setup_model_parallel()
     if rank > 0:
@@ -137,7 +142,14 @@ def main(
         #
         #cheese =>""",
     ]
-    for _ in range(2):
+    # warmup
+    with torch.no_grad():
+            results = generator.generate(prompts,
+                                         256,
+                                         xm.xla_device(),
+                                         temperature=temperature,
+                                         top_p=top_p)
+    for _ in range(n_times):
         with torch.no_grad():
             results = generator.generate(prompts,
                                          256,
@@ -148,6 +160,11 @@ def main(
         for result in results:
             print(result)
             print("\n==================================\n")
+    print("XLA:GPU ENV INFO:")
+    print(f"USE_XLA: {bool(USE_XLA)}, USE_CUDA: {bool(USE_CUDA)}, USE_TORCH_DYNAMO: {bool(USE_TORCH_DYNAMO)}, NUM_GPU(S): {GPU_NUM_DEVICES}")
+    print(f"Run LLaMA model in {ckpt_dir} for {n_times} prompts with {max_batch_size} max batch size(s)")
+    print(f"\t- mean latency: {sum(generator.latency_list[1:]) / n_times}(s)")
+    print(f"\t- mean per-token latency: {sum(generator.per_token_latency_list[1:]) / n_times * 1000}(ms/token)")
 
 
 def _fn(
@@ -162,9 +179,10 @@ def _fn(
     n_layers: int = 32,
     n_heads: int = 32,
     quant: bool = False,
+    n_times: int = 3,
 ):
     main(tokenizer_path, temperature, top_p, max_seq_len, max_batch_size,
-         ckpt_dir, dim, n_layers, n_heads, quant)
+         ckpt_dir, dim, n_layers, n_heads, quant, n_times)
 
 
 def mp_main(
@@ -179,15 +197,16 @@ def mp_main(
     n_layers: int = 32,
     n_heads: int = 32,
     quant: bool = False,
+    n_times: int = 3,
 ):
-    if mp:
+    if mp and USE_XLA:
         xmp.spawn(_fn,
                   args=(tokenizer_path, temperature, top_p, max_seq_len,
                         max_batch_size, ckpt_dir, dim, n_layers, n_heads,
-                        quant))
+                        quant, n_times))
     else:
         main(tokenizer_path, temperature, top_p, max_seq_len, max_batch_size,
-             ckpt_dir, dim, n_layers, n_heads, quant)
+             ckpt_dir, dim, n_layers, n_heads, quant, n_times)
 
 
 if __name__ == "__main__":

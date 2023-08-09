@@ -11,7 +11,10 @@ from llama.model import Transformer
 
 import os
 
-USE_CUDA = os.environ.get('USE_CUDA', False)
+USE_CUDA = bool(int(os.environ.get('USE_CUDA', 0)))
+USE_XLA = bool(int(os.environ.get('USE_XLA', 0)))
+USE_TORCH_DYNAMO = bool(int(os.environ.get('USE_TORCH_DYNAMO', 1)))
+
 
 # Some how xla init will slow down the CUDA speed.
 if not USE_CUDA:
@@ -24,15 +27,18 @@ class LLaMA:
         self.model = model
         self.tokenizer = tokenizer
         self._generate_one_token_fn = self._generate_one_token
-        if USE_CUDA:
-            # Inductor errors out when compiles _generate_one_token_fn.
-            # TODO(alanwaketan): figure out why.
-            self.model = torch.compile(self.model, fullgraph=True)
-        else:
-            self._generate_one_token_fn = torch.compile(
-                self._generate_one_token_fn,
-                backend="torchxla_trace_once",
-                fullgraph=True)
+        if USE_TORCH_DYNAMO:
+            if USE_CUDA:
+                # Inductor errors out when compiles _generate_one_token_fn.
+                # TODO(alanwaketan): figure out why.
+                self.model = torch.compile(self.model, fullgraph=True)
+            if USE_XLA:
+                self._generate_one_token_fn = torch.compile(
+                    self._generate_one_token_fn,
+                    backend="torchxla_trace_once",
+                    fullgraph=True)
+        self.latency_list: List[float] = []
+        self.per_token_latency_list: List[float] = []         
 
     def _generate_one_token(self, tokens, input_tokens, input_text_mask,
                             cur_pos_tensor, input_pos_tensor,
@@ -106,7 +112,8 @@ class LLaMA:
         decoding_start_time = time.time()
         prev_pos = 0
         buckets = [128, 256, 384, 512]
-        assert params.max_seq_len % buckets[-1] == 0
+        # NOTE: This is a temporary measure to run with max_seq_len=256
+        # assert params.max_seq_len % buckets[-1] == 0
         while prev_pos < min_prompt_size:
             remaining = min_prompt_size - prev_pos
             section_len = 0
@@ -167,7 +174,11 @@ class LLaMA:
             except IndexError:
                 sentence = self.tokenizer.decode(t[1:])
             decoded.append(sentence)
-        print(f"Completed in {time.time() - start_time:.5f} seconds")
+        latency = time.time() - start_time
+        per_token_latency = latency / (total_len - 1)
+        print(f"Completed in {latency:.5f} seconds")
+        self.latency_list.append(latency)
+        self.per_token_latency_list.append(per_token_latency)
         return decoded
 
 
