@@ -142,7 +142,14 @@ def main(
         #
         #cheese =>""",
     ]
-    for _ in range(n_times + 1):
+    # warmup
+    with torch.no_grad():
+            results = generator.generate(prompts,
+                                         256,
+                                         xm.xla_device(),
+                                         temperature=temperature,
+                                         top_p=top_p)
+    for _ in range(n_times):
         with torch.no_grad():
             results = generator.generate(prompts,
                                          256,
