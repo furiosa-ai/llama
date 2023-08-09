@@ -15,13 +15,14 @@ from llama.xla_model_parallel import get_model_parallel_rank, get_model_parallel
 
 import os
 
-USE_CUDA = os.environ.get('USE_CUDA', False)
-USE_XLA = os.environ.get('USE_XLA', False)
-GPU_NUM_DEVICES = os.environ.get("GPU_NUM_DEVICES", 0)
+USE_CUDA = bool(int(os.environ.get('USE_CUDA', 0)))
+USE_XLA = bool(int(os.environ.get('USE_XLA', 0)))
+USE_TORCH_DYNAMO = bool(int(os.environ.get('USE_TORCH_DYNAMO', 1)))
+GPU_NUM_DEVICES = int(os.environ.get("GPU_NUM_DEVICES", 0))
 
 
 # Some how xla init will slow down the CUDA speed.
-if not USE_CUDA:
+if USE_XLA:
     import torch_xla.core.xla_model as xm
     import torch_xla.distributed.xla_multiprocessing as xmp
 
@@ -153,7 +154,7 @@ def main(
             print(result)
             print("\n==================================\n")
     print("XLA:GPU ENV INFO:")
-    print(f"USE_XLA: {bool(USE_XLA)}, USE_CUDA: {bool(USE_CUDA)}, NUM_GPU(S): {GPU_NUM_DEVICES}")
+    print(f"USE_XLA: {bool(USE_XLA)}, USE_CUDA: {bool(USE_CUDA)}, USE_TORCH_DYNAMO: {bool(USE_TORCH_DYNAMO)}, NUM_GPU(S): {GPU_NUM_DEVICES}")
     print(f"Run LLaMA model in {ckpt_dir} for {n_times} prompts with {max_batch_size} max batch size(s)")
     print(f"\t- mean latency: {sum(generator.latency_list[1:]) / n_times}(s)")
     print(f"\t- mean per-token latency: {sum(generator.per_token_latency_list[1:]) / n_times * 1000}(ms/token)")
@@ -191,7 +192,7 @@ def mp_main(
     quant: bool = False,
     n_times: int = 3,
 ):
-    if mp:
+    if mp and USE_XLA:
         xmp.spawn(_fn,
                   args=(tokenizer_path, temperature, top_p, max_seq_len,
                         max_batch_size, ckpt_dir, dim, n_layers, n_heads,
