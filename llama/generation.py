@@ -11,8 +11,9 @@ from llama.model import Transformer
 
 import os
 
-USE_CUDA = os.environ.get('USE_CUDA', False)
-USE_XLA = os.environ.get('USE_XLA', False)
+USE_CUDA = bool(int(os.environ.get('USE_CUDA', 0)))
+USE_XLA = bool(int(os.environ.get('USE_XLA', 0)))
+USE_TORCH_DYNAMO = bool(int(os.environ.get('USE_TORCH_DYNAMO', 1)))
 
 
 # Some how xla init will slow down the CUDA speed.
@@ -26,15 +27,16 @@ class LLaMA:
         self.model = model
         self.tokenizer = tokenizer
         self._generate_one_token_fn = self._generate_one_token
-        if USE_CUDA:
-            # Inductor errors out when compiles _generate_one_token_fn.
-            # TODO(alanwaketan): figure out why.
-            self.model = torch.compile(self.model, fullgraph=True)
-        if USE_XLA:
-            self._generate_one_token_fn = torch.compile(
-                self._generate_one_token_fn,
-                backend="torchxla_trace_once",
-                fullgraph=True)
+        if USE_TORCH_DYNAMO:
+            if USE_CUDA:
+                # Inductor errors out when compiles _generate_one_token_fn.
+                # TODO(alanwaketan): figure out why.
+                self.model = torch.compile(self.model, fullgraph=True)
+            if USE_XLA:
+                self._generate_one_token_fn = torch.compile(
+                    self._generate_one_token_fn,
+                    backend="torchxla_trace_once",
+                    fullgraph=True)
         self.latency_list: List[float] = []
         self.per_token_latency_list: List[float] = []         
 
