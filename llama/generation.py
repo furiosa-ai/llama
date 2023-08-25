@@ -32,11 +32,11 @@ class LLaMA:
                 # Inductor errors out when compiles _generate_one_token_fn.
                 # TODO(alanwaketan): figure out why.
                 self.model = torch.compile(self.model, fullgraph=True)
-            if USE_XLA:
-                self._generate_one_token_fn = torch.compile(
-                    self._generate_one_token_fn,
-                    backend="torchxla_trace_once",
-                    fullgraph=True)
+            # if USE_XLA:
+            #     self._generate_one_token_fn = torch.compile(
+            #         self._generate_one_token_fn,
+            #         backend="torchxla_trace_once",
+            #         fullgraph=True)
         self.latency_list: List[float] = []
         self.per_token_latency_list: List[float] = []         
 
@@ -44,6 +44,8 @@ class LLaMA:
                             cur_pos_tensor, input_pos_tensor,
                             output_pos_tensor, cache_kvs, temperature_tensor,
                             top_p_tensor, with_temp):
+        print("output_pos_tensor", output_pos_tensor)
+        print("input_tokens", input_tokens)                            
         logits, cache_kvs = self.model(input_tokens, input_pos_tensor,
                                        output_pos_tensor, cache_kvs)
         if with_temp:
@@ -53,8 +55,11 @@ class LLaMA:
             next_token = torch.argmax(logits, dim=-1)
         next_token = next_token.reshape(-1)
         # only replace token if prompt has already been generated
+        print(cur_pos_tensor)
         input_text_mask_tmp = input_text_mask.index_select(
             1, cur_pos_tensor).squeeze(dim=1)
+        print(input_text_mask, input_text_mask.shape)
+        print(input_text_mask_tmp, input_text_mask_tmp.shape)
         tokens_tmp = tokens.index_select(1, cur_pos_tensor).squeeze(dim=1)
         next_token = torch.where(input_text_mask_tmp, tokens_tmp, next_token)
         next_token = next_token.unsqueeze(1)
@@ -85,18 +90,21 @@ class LLaMA:
         prompt_tokens = [
             self.tokenizer.encode(x, bos=bos, eos=False) for x in prompts
         ]
-
+        print(f"input prompt lengths: {[len(prmt) for prmt in prompt_tokens]}")
         min_prompt_size = min([len(t) for t in prompt_tokens])
         max_prompt_size = max([len(t) for t in prompt_tokens])
+        print(f"min prompt size: {min_prompt_size}")
+        print(f"max prompt size: {max_prompt_size}")
         assert min_prompt_size >= 1 and max_prompt_size < params.max_seq_len
 
         total_len = min(params.max_seq_len, max_gen_len + max_prompt_size)
-
+        print(f"total length: {total_len}")
         tokens = torch.full((params.max_batch_size, params.max_seq_len),
                             self.tokenizer.pad_id).long()
         for k, t in enumerate(prompt_tokens):
             tokens[k, :len(t)] = torch.tensor(t).long()
         tokens = tokens.to(device)
+        
         input_text_mask = tokens != self.tokenizer.pad_id
 
         # Passing tensors instead of floats into self._generate_one_token_fn,
@@ -127,12 +135,13 @@ class LLaMA:
             cur_pos = min(min_prompt_size, prev_pos + section_len)
             print(f"Processing prompt pos [{prev_pos}, {prev_pos + section_len}), section length {section_len}, cur_pos {cur_pos}")
             cur_pos_tensor = torch.tensor(cur_pos).to(device)
+            print(cur_pos_tensor, cur_pos_tensor.shape)
             input_pos_tensor = torch.arange(prev_pos, prev_pos + section_len).to(device)
+            print(input_pos_tensor, input_pos_tensor.shape)
             output_pos_tensor = cur_pos_tensor - 1
             input_tokens = tokens.index_select(1, input_pos_tensor)
             if device.type == "xla":
                 xm.mark_step()
-
             tokens, input_tokens, cur_pos_tensor, input_pos_tensor, output_pos_tensor, cache_kvs \
                 = self._generate_one_token_fn(
                     tokens, input_tokens, input_text_mask, cur_pos_tensor,
@@ -145,6 +154,7 @@ class LLaMA:
             prev_pos = cur_pos
 
         assert cur_pos_tensor.item() == prev_pos + 1 and prev_pos == min_prompt_size
+        print(f"final prev_pos: {prev_pos}")
         for _ in range(prev_pos + 1, total_len):
             tokens, input_tokens, cur_pos_tensor, input_pos_tensor, output_pos_tensor, cache_kvs \
                 = self._generate_one_token_fn(
@@ -164,6 +174,7 @@ class LLaMA:
                 break
             # cut to max gen len
             t = t[:len(prompt_tokens[i]) + max_gen_len]
+            print(f"decoded prompt length: {len(t)}")
             # cut to eos tok if any
             try:
                 t = t[:t.index(self.tokenizer.eos_id)]

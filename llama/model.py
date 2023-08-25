@@ -361,12 +361,16 @@ class Transformer(nn.Module):
         freqs_cis = self.freqs_cis.index_select(0, input_idexes)
 
         mask = self.mask.index_select(2, input_idexes)
-
+        print("mask", mask)
+        print("input_idexes", input_idexes)
         new_cache_kvs = []
         for layer, cache_kv in zip(self.layers, cache_kvs):
             h, new_cache_kv = layer(h, freqs_cis, mask, input_idexes, cache_kv)
             new_cache_kvs.append(new_cache_kv)
         h = self.norm(h)
+        print(h.shape)
+        print(output_idex, input_idexes[0])
         h = h.index_select(1, output_idex - input_idexes[0]).squeeze(dim=1)
+        print(h, h.shape)
         output = self.output(h)
         return output.float(), new_cache_kvs
