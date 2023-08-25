@@ -191,7 +191,7 @@ def main(
         with torch.no_grad():
             for prompt in prompts:
                 results = generator.generate(
-                    prompt, 256, xm.xla_device(), temperature=temperature, top_p=top_p
+                    prompt, 8, xm.xla_device(), temperature=temperature, top_p=top_p
                 )
 
         for result in results:
