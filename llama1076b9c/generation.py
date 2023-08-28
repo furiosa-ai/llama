@@ -29,10 +29,12 @@ class LLaMA:
             self._generate_one_token_fn = torch.compile(self._generate_one_token_fn, backend=custom_backend)
 
     def _generate_one_token(self, tokens, input_text_mask,
-                            cur_pos, prev_pos,
+                            cur_pos, prev_pos, cache_kvs,
                             temperature,
                             top_p):
-        logits = self.model.forward(tokens[:, prev_pos:cur_pos], prev_pos)
+        input_pos_tensor = torch.arange(prev_pos, cur_pos).cuda()
+        output_pos_tensor = torch.tensor(cur_pos - 1).cuda()
+        logits, cache_kvs = self.model.forward(tokens[:, prev_pos:cur_pos], prev_pos, input_pos_tensor, output_pos_tensor, cache_kvs)
         if temperature > 0:
             probs = torch.softmax(logits / temperature, dim=-1)
             next_token = sample_top_p(probs, top_p)
@@ -44,7 +46,7 @@ class LLaMA:
             input_text_mask[:, cur_pos], tokens[:, cur_pos], next_token
         )
         tokens[:, cur_pos] = next_token
-        return tokens
+        return tokens, cache_kvs
 
     def generate(
         self,
@@ -69,6 +71,9 @@ class LLaMA:
             tokens[k, : len(t)] = torch.tensor(t).long()
         input_text_mask = tokens != self.tokenizer.pad_id
         start_pos = min_prompt_size
+
+        cache_kvs = self.model.cache_kvs
+
         prev_pos = 0
         i = 0
         print(f"total_len: {total_len}")
@@ -80,8 +85,9 @@ class LLaMA:
                 print(f"{i}-th pre-fill-phase")
             else:
                 print(f"{i}-th decoding phase")
-            tokens = self._generate_one_token_fn(tokens, input_text_mask, cur_pos, prev_pos, temperature, top_p)
+            tokens, cache_kvs = self._generate_one_token_fn(tokens, input_text_mask, cur_pos, prev_pos, cache_kvs, temperature, top_p)
             prev_pos = cur_pos
+        self.model.cache_kvs = cache_kvs
 
         decoded = []
         for i, t in enumerate(tokens.tolist()):
