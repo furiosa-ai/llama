@@ -13,8 +13,10 @@ from pathlib import Path
 
 from fairscale.nn.model_parallel.initialize import initialize_model_parallel
 
-from llama import ModelArgs, Transformer, Tokenizer, LLaMA
+from llama1076b9c import ModelArgs, Transformer, Tokenizer, LLaMA
 
+import torch
+torch._dynamo.config.cache_size_limit = 128
 
 def setup_model_parallel() -> Tuple[int, int]:
     local_rank = int(os.environ.get("LOCAL_RANK", -1))
@@ -79,34 +81,15 @@ def main(
                      max_seq_len, max_batch_size)
 
     prompts = [
-        # For these prompts, the expected answer is the natural continuation of the prompt
-        "I believe the meaning of life is",
-        "Simply put, the theory of relativity states that ",
-        "Building a website can be done in 10 simple steps:\n",
-        # Few shot prompts: https://huggingface.co/blog/few-shot-learning-gpt-neo-and-inference-api
-        """Tweet: "I hate it when my phone battery dies."
-Sentiment: Negative
-###
-Tweet: "My day has been 👍"
-Sentiment: Positive
-###
-Tweet: "This is the link to the article"
-Sentiment: Neutral
-###
-Tweet: "This new music video was incredibile"
-Sentiment:""",
-        """Translate English to French:
-
-sea otter => loutre de mer
-
-peppermint => menthe poivrée
-
-plush girafe => girafe peluche
-
-cheese =>""",
+        [
+            "Tesla, Inc. (/ˈtɛslə/ TESS-lə or /ˈtɛzlə/ TEZ-lə[a]) is an American multinational automotive and clean energy company headquartered in Austin, Texas. Tesla designs and manufactures electric vehicles (cars and trucks), stationary battery energy storage devices from home to grid-scale, solar panels and solar shingles, and related products and services.\
+        Tesla is one of the world's most valuable companies and, as of 2023, is the world's most valuable automaker. In 2022, the company led the battery electric vehicle market, with 18% share.\
+        Its subsidiary Tesla Energy develops and is a major installer of photovoltaic systems in the United States and is one of the largest global suppliers of battery energy storage systems with 6.5 gigawatt-hours (GWh) installed in 2022.\
+        Tesla was incorporated in July 2003 by Martin Eberhard and Marc Tarpenning as Tesla Motors. The company's name is a tribute to inventor and electrical engineer Nikola Tesla. In February 2004, via a $6.5 million investment, Elon Musk became the company's largest shareholder. He became CEO in 2008. Tesla's announced mission is to create products which help “accelerate the world’s transition to sustainable energy.”",
+        ],
     ]
-    results = generator.generate(prompts,
-                                 max_gen_len=256,
+    results = generator.generate(prompts[0],
+                                 max_gen_len=8,
                                  temperature=temperature,
                                  top_p=top_p)
 

@@ -4,15 +4,47 @@
 from typing import List
 
 import torch
+import os
 
-from llama.tokenizer import Tokenizer
-from llama.model import Transformer
+from llama1076b9c.tokenizer import Tokenizer
+from llama1076b9c.model import Transformer
+
+USE_TORCH_DYNAMO = bool(int(os.environ.get('USE_TORCH_DYNAMO', 1)))
 
 
 class LLaMA:
     def __init__(self, model: Transformer, tokenizer: Tokenizer):
         self.model = model
         self.tokenizer = tokenizer
+        self._generate_one_token_fn = self._generate_one_token
+        if USE_TORCH_DYNAMO:
+            from typing import List
+            def custom_backend(gm: torch.fx.GraphModule, example_inputs: List[torch.Tensor]):
+                print("custom backend called with FX graph:")
+                gm.graph.print_tabular()
+                return gm.forward
+
+            # Reset since we are using a different backend.
+            torch._dynamo.reset()
+            self._generate_one_token_fn = torch.compile(self._generate_one_token_fn, backend=custom_backend)
+
+    def _generate_one_token(self, tokens, input_text_mask,
+                            cur_pos, prev_pos,
+                            temperature,
+                            top_p):
+        logits = self.model.forward(tokens[:, prev_pos:cur_pos], prev_pos)
+        if temperature > 0:
+            probs = torch.softmax(logits / temperature, dim=-1)
+            next_token = sample_top_p(probs, top_p)
+        else:
+            next_token = torch.argmax(logits, dim=-1)
+        next_token = next_token.reshape(-1)
+        # only replace token if prompt has already been generated
+        next_token = torch.where(
+            input_text_mask[:, cur_pos], tokens[:, cur_pos], next_token
+        )
+        tokens[:, cur_pos] = next_token
+        return tokens
 
     def generate(
         self,
@@ -38,19 +70,17 @@ class LLaMA:
         input_text_mask = tokens != self.tokenizer.pad_id
         start_pos = min_prompt_size
         prev_pos = 0
+        i = 0
+        print(f"total_len: {total_len}")
         for cur_pos in range(start_pos, total_len):
-            logits = self.model.forward(tokens[:, prev_pos:cur_pos], prev_pos)
-            if temperature > 0:
-                probs = torch.softmax(logits / temperature, dim=-1)
-                next_token = sample_top_p(probs, top_p)
+            print("\n")
+            print(f"cur_pos: {cur_pos}")
+            i += 1
+            if i == 1:
+                print(f"{i}-th pre-fill-phase")
             else:
-                next_token = torch.argmax(logits, dim=-1)
-            next_token = next_token.reshape(-1)
-            # only replace token if prompt has already been generated
-            next_token = torch.where(
-                input_text_mask[:, cur_pos], tokens[:, cur_pos], next_token
-            )
-            tokens[:, cur_pos] = next_token
+                print(f"{i}-th decoding phase")
+            tokens = self._generate_one_token_fn(tokens, input_text_mask, cur_pos, prev_pos, temperature, top_p)
             prev_pos = cur_pos
 
         decoded = []
