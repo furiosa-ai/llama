@@ -10,11 +10,23 @@ from torch import nn
 import torch.nn.functional as F
 
 from fairscale.nn.model_parallel.utils import divide_and_check_no_remainder
-import fairscale.nn.model_parallel.initialize as fs_init
-from fairscale.nn.model_parallel.layers import (
+# import fairscale.nn.model_parallel.initialize as fs_init
+# from fairscale.nn.model_parallel.layers import (
+#     ParallelEmbedding,
+#     RowParallelLinear,
+#     ColumnParallelLinear,
+#     get_model_parallel_group,
+#     get_model_parallel_world_size,
+#     get_model_parallel_rank,
+# )
+
+from llama.xla_model_parallel import (
     ParallelEmbedding,
     RowParallelLinear,
     ColumnParallelLinear,
+    get_model_parallel_group,
+    get_model_parallel_world_size,
+    get_model_parallel_rank,
 )
 
 
@@ -75,39 +87,62 @@ def apply_rotary_emb(
 
 
 class Attention(nn.Module):
-    def __init__(self, args: ModelArgs):
+    def __init__(self, args: ModelArgs,
+                world_size: Optional[int] = None,
+                rank: Optional[int] = None,
+                groups: Optional[List] = None):
         super().__init__()
 
-        self.n_local_heads = args.n_heads // fs_init.get_model_parallel_world_size()
+        if world_size is None:
+            groups = get_model_parallel_group()
+            world_size = get_model_parallel_world_size()
+            rank = get_model_parallel_rank()
+
+        self.n_local_heads = divide_and_check_no_remainder(
+            args.n_heads, world_size)
         self.head_dim = args.dim // args.n_heads
+
+        init_method = lambda x: x
 
         self.wq = ColumnParallelLinear(
             args.dim,
             args.n_heads * self.head_dim,
             bias=False,
             gather_output=False,
-            init_method=lambda x: x,
+            init_method=init_method,
+            world_size=world_size,
+            rank=rank,
+            groups=groups,
         )
         self.wk = ColumnParallelLinear(
             args.dim,
             args.n_heads * self.head_dim,
             bias=False,
             gather_output=False,
-            init_method=lambda x: x,
+            init_method=init_method,
+            world_size=world_size,
+            rank=rank,
+            groups=groups,
         )
         self.wv = ColumnParallelLinear(
             args.dim,
             args.n_heads * self.head_dim,
             bias=False,
             gather_output=False,
-            init_method=lambda x: x,
+            init_method=init_method,
+            world_size=world_size,
+            rank=rank,
+            groups=groups,
         )
         self.wo = RowParallelLinear(
             args.n_heads * self.head_dim,
             args.dim,
             bias=False,
             input_is_parallel=True,
-            init_method=lambda x: x,
+            init_method=init_method,
+            world_size=world_size,
+            rank=rank,
+            groups=groups,
         )
 
     def forward(self, x: torch.Tensor, start_pos: int, freqs_cis: torch.Tensor, mask: Optional[torch.Tensor], input_idexes: torch.Tensor,
@@ -122,8 +157,8 @@ class Attention(nn.Module):
 
         xq, xk = apply_rotary_emb(xq, xk, freqs_cis=freqs_cis)
 
-        cache_k = cache_k.index_copy(1, input_idexes, xk).cuda()
-        cache_v = cache_v.index_copy(1, input_idexes, xv).cuda()
+        cache_k = cache_k.index_copy(1, input_idexes, xk)
+        cache_v = cache_v.index_copy(1, input_idexes, xv)
 
         keys = cache_k[:, :]
         values = cache_v[:, :]
@@ -193,15 +228,27 @@ class TransformerBlock(nn.Module):
 
 
 class Transformer(nn.Module):
-    def __init__(self, params: ModelArgs):
+    def __init__(self, params: ModelArgs, world_size: Optional[int] = None,
+                 rank: Optional[int] = None,
+                 groups: Optional[List] = None):
         super().__init__()
         self.params = params
         self.vocab_size = params.vocab_size
         self.n_layers = params.n_layers
 
-        self.tok_embeddings = ParallelEmbedding(
-            params.vocab_size, params.dim, init_method=lambda x: x
-        )
+        if world_size is None:
+            groups = get_model_parallel_group()
+            world_size = get_model_parallel_world_size()
+            rank = get_model_parallel_rank()
+
+        init_method = lambda x: x
+
+        self.tok_embeddings = ParallelEmbedding(params.vocab_size,
+                                                params.dim,
+                                                init_method=init_method,
+                                                world_size=world_size,
+                                                rank=rank,
+                                                groups=groups)
 
         self.layers = torch.nn.ModuleList()
         self.cache_kvs = []
@@ -222,21 +269,22 @@ class Transformer(nn.Module):
             params.dim, params.vocab_size, bias=False, init_method=lambda x: x
         )
 
-        self.freqs_cis = precompute_freqs_cis(
+        freqs_cis = precompute_freqs_cis(
             self.params.dim // self.params.n_heads, self.params.max_seq_len * 2
         )
+        self.register_buffer("freqs_cis", freqs_cis)
 
         mask = torch.full(
             (1, 1, self.params.max_seq_len, self.params.max_seq_len),
             float("-inf")).to(torch.float)
-        self.mask = torch.triu(mask, diagonal=1)
+        mask = torch.triu(mask, diagonal=1)
+        self.register_buffer("mask", mask)
 
-    @torch.inference_mode()
+    @torch.no_grad()
     def forward(self, tokens: torch.Tensor, start_pos: int, input_idexes: torch.Tensor, output_idex: torch.Tensor, cache_kvs: List[Tuple[torch.Tensor, torch.Tensor]]):
         _bsz, seqlen = tokens.shape
         h = self.tok_embeddings(tokens)
-        self.freqs_cis = self.freqs_cis.to(h.device)
-        freqs_cis = self.freqs_cis[start_pos : start_pos + seqlen]
+        freqs_cis = self.freqs_cis.index_select(0, input_idexes)
 
         mask = self.mask.index_select(2, input_idexes)
         new_cache_kvs = []

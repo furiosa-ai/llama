@@ -6,6 +6,8 @@ from typing import List
 import torch
 import os
 
+import torch_xla.core.xla_model as xm
+
 from llama1076b9c.tokenizer import Tokenizer
 from llama1076b9c.model import Transformer
 
@@ -61,10 +63,10 @@ class LLaMA:
         self,
         prompts: List[str],
         max_gen_len: int,
+        device: str,
         temperature: float = 0.8,
         top_p: float = 0.95,
     ) -> List[str]:
-        device = 'cuda'
         bsz = len(prompts)
         params = self.model.params
         assert bsz <= params.max_batch_size, (bsz, params.max_batch_size)
@@ -76,7 +78,7 @@ class LLaMA:
 
         total_len = min(params.max_seq_len, max_gen_len + max_prompt_size)
 
-        tokens = torch.full((params.max_batch_size, params.max_seq_len), self.tokenizer.pad_id).cuda().long()
+        tokens = torch.full((params.max_batch_size, params.max_seq_len), self.tokenizer.pad_id).to(device).long()
         for k, t in enumerate(prompt_tokens):
             tokens[k, : len(t)] = torch.tensor(t).long()
         tokens = tokens.to(device)
@@ -91,7 +93,9 @@ class LLaMA:
         with_temp = temperature > 0
 
         cache_kvs = self.model.cache_kvs
-
+        if device.type == "xla":
+            xm.mark_step()
+        
         prev_pos = 0
         i = 0
         print(f"total_len: {total_len}")
@@ -108,33 +112,44 @@ class LLaMA:
             output_pos_tensor = torch.tensor(cur_pos - 1).to(device)
             input_pos_tensor = torch.arange(prev_pos, cur_pos).to(device)
             input_tokens = tokens.index_select(1, input_pos_tensor)
+            if device.type == "xla":
+                xm.mark_step()
             tokens, input_tokens, cur_pos_tensor, input_pos_tensor, output_pos_tensor, cache_kvs \
                 = self._generate_one_token_fn(
                     tokens, input_tokens, prev_pos_tensor, input_text_mask, cur_pos_tensor,
                     input_pos_tensor, output_pos_tensor, cache_kvs,
                     temperature_tensor, top_p_tensor, with_temp
                 )
+            if device.type == "xla":
+                xm.mark_step()
             prev_pos = cur_pos
         self.model.cache_kvs = cache_kvs
 
         decoded = []
         for i, t in enumerate(tokens.tolist()):
+            if i >= len(prompt_tokens):
+                break
             # cut to max gen len
-            t = t[: len(prompt_tokens[i]) + max_gen_len]
+            t = t[:len(prompt_tokens[i]) + max_gen_len]
+            print(f"decoded prompt length: {len(t)}")
             # cut to eos tok if any
             try:
-                t = t[: t.index(self.tokenizer.eos_id)]
+                t = t[:t.index(self.tokenizer.eos_id)]
             except ValueError:
                 pass
-            decoded.append(self.tokenizer.decode(t))
+            try:
+                sentence = self.tokenizer.decode(t)
+            except IndexError:
+                sentence = self.tokenizer.decode(t[1:])
+            decoded.append(sentence)
         return decoded
 
 
 def sample_top_p(probs, p):
     probs_sort, probs_idx = torch.sort(probs, dim=-1, descending=True)
     probs_sum = torch.cumsum(probs_sort, dim=-1)
-    mask = probs_sum - probs_sort > p
-    probs_sort[mask] = 0.0
+    mask = (probs_sum - probs_sort) > p
+    probs_sort = torch.where(mask, 0.0, probs_sort)
     probs_sort.div_(probs_sort.sum(dim=-1, keepdim=True))
     next_token = torch.multinomial(probs_sort, num_samples=1)
     next_token = torch.gather(probs_idx, -1, next_token)
