@@ -10,7 +10,7 @@ import time
 import json
 from pathlib import Path
 
-from llama import ModelArgs, Transformer, Tokenizer, LLaMA
+from llama1076b9c import ModelArgs, Transformer, Tokenizer, LLaMA
 from llama.xla_model_parallel import (
     get_model_parallel_rank,
     get_model_parallel_world_size,
@@ -197,18 +197,6 @@ def main(
         for result in results:
             print(result)
             print("\n==================================\n")
-
-    print("XLA:GPU ENV INFO:")
-    print(
-        f"USE_XLA: {bool(USE_XLA)}, USE_CUDA: {bool(USE_CUDA)}, USE_TORCH_DYNAMO: {bool(USE_TORCH_DYNAMO)}, NUM_GPU(S): {GPU_NUM_DEVICES}"
-    )
-    print(
-        f"Run LLaMA model in {ckpt_dir} for {n_times} prompts with {max_batch_size} max batch size(s)"
-    )
-    print(f"\t- mean latency: {sum(generator.latency_list[1:]) / n_times}(s)")
-    print(
-        f"\t- mean per-token latency: {sum(generator.per_token_latency_list[1:]) / n_times * 1000}(ms/token)"
-    )
 
 
 def _fn(

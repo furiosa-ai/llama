@@ -11,7 +11,10 @@ from llama.model import Transformer
 
 import os
 
-USE_CUDA = os.environ.get('USE_CUDA', False)
+USE_CUDA = bool(int(os.environ.get('USE_CUDA', 0)))
+USE_XLA = bool(int(os.environ.get('USE_XLA', 0)))
+USE_TORCH_DYNAMO = bool(int(os.environ.get('USE_TORCH_DYNAMO', 1)))
+
 
 # Some how xla init will slow down the CUDA speed.
 if not USE_CUDA:
@@ -24,15 +27,29 @@ class LLaMA:
         self.model = model
         self.tokenizer = tokenizer
         self._generate_one_token_fn = self._generate_one_token
-        if USE_CUDA:
-            # Inductor errors out when compiles _generate_one_token_fn.
-            # TODO(alanwaketan): figure out why.
-            self.model = torch.compile(self.model, fullgraph=True)
-        else:
-            self._generate_one_token_fn = torch.compile(
-                self._generate_one_token_fn,
-                backend="torchxla_trace_once",
-                fullgraph=True)
+        if USE_TORCH_DYNAMO:
+            if USE_CUDA:
+                # Inductor errors out when compiles _generate_one_token_fn.
+                # TODO(alanwaketan): figure out why.
+                self.model = torch.compile(self.model, fullgraph=True)
+            if USE_XLA:
+                from typing import List
+                def custom_backend(gm: torch.fx.GraphModule, example_inputs: List[torch.Tensor]):
+                    print("custom backend called with FX graph:")
+                    gm.graph.print_tabular()
+                    return gm.forward
+
+                # Reset since we are using a different backend.
+                torch._dynamo.reset()
+                self._generate_one_token_fn = torch.compile(self._generate_one_token_fn, backend=custom_backend)
+
+                # self._generate_one_token_fn = torch.compile(
+                #     self._generate_one_token_fn,
+                #     backend="torchxla_trace_once",
+                #     fullgraph=True)
+                
+        self.latency_list: List[float] = []
+        self.per_token_latency_list: List[float] = []         
 
     def _generate_one_token(self, tokens, input_tokens, input_text_mask,
                             cur_pos_tensor, input_pos_tensor,
@@ -79,18 +96,21 @@ class LLaMA:
         prompt_tokens = [
             self.tokenizer.encode(x, bos=bos, eos=False) for x in prompts
         ]
-
+        print(f"input prompt lengths: {[len(prmt) for prmt in prompt_tokens]}")
         min_prompt_size = min([len(t) for t in prompt_tokens])
         max_prompt_size = max([len(t) for t in prompt_tokens])
+        print(f"min prompt size: {min_prompt_size}")
+        print(f"max prompt size: {max_prompt_size}")
         assert min_prompt_size >= 1 and max_prompt_size < params.max_seq_len
 
         total_len = min(params.max_seq_len, max_gen_len + max_prompt_size)
-
+        print(f"total length: {total_len}")
         tokens = torch.full((params.max_batch_size, params.max_seq_len),
                             self.tokenizer.pad_id).long()
         for k, t in enumerate(prompt_tokens):
             tokens[k, :len(t)] = torch.tensor(t).long()
         tokens = tokens.to(device)
+        
         input_text_mask = tokens != self.tokenizer.pad_id
 
         # Passing tensors instead of floats into self._generate_one_token_fn,
@@ -106,7 +126,9 @@ class LLaMA:
         decoding_start_time = time.time()
         prev_pos = 0
         buckets = [128, 256, 384, 512]
-        assert params.max_seq_len % buckets[-1] == 0
+        # NOTE: This is a temporary measure to run with max_seq_len=256
+        # assert params.max_seq_len % buckets[-1] == 0
+        i = 0
         while prev_pos < min_prompt_size:
             remaining = min_prompt_size - prev_pos
             section_len = 0
@@ -125,7 +147,8 @@ class LLaMA:
             input_tokens = tokens.index_select(1, input_pos_tensor)
             if device.type == "xla":
                 xm.mark_step()
-
+            i += 1
+            print(f"\n{i}-th loop in pre-fill phase")
             tokens, input_tokens, cur_pos_tensor, input_pos_tensor, output_pos_tensor, cache_kvs \
                 = self._generate_one_token_fn(
                     tokens, input_tokens, input_text_mask, cur_pos_tensor,
@@ -138,7 +161,9 @@ class LLaMA:
             prev_pos = cur_pos
 
         assert cur_pos_tensor.item() == prev_pos + 1 and prev_pos == min_prompt_size
-        for _ in range(prev_pos + 1, total_len):
+
+        for i, _ in enumerate(range(prev_pos + 1, total_len)):
+            print(f"\n{i+1}-th decoding phase")
             tokens, input_tokens, cur_pos_tensor, input_pos_tensor, output_pos_tensor, cache_kvs \
                 = self._generate_one_token_fn(
                     tokens, input_tokens, input_text_mask, cur_pos_tensor,
@@ -157,6 +182,7 @@ class LLaMA:
                 break
             # cut to max gen len
             t = t[:len(prompt_tokens[i]) + max_gen_len]
+            print(f"decoded prompt length: {len(t)}")
             # cut to eos tok if any
             try:
                 t = t[:t.index(self.tokenizer.eos_id)]
@@ -167,7 +193,11 @@ class LLaMA:
             except IndexError:
                 sentence = self.tokenizer.decode(t[1:])
             decoded.append(sentence)
-        print(f"Completed in {time.time() - start_time:.5f} seconds")
+        latency = time.time() - start_time
+        per_token_latency = latency / (total_len - 1)
+        print(f"Completed in {latency:.5f} seconds")
+        self.latency_list.append(latency)
+        self.per_token_latency_list.append(per_token_latency)
         return decoded
 
 
